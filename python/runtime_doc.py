@@ -230,21 +230,23 @@ def _infer_receiver_type(expression: str, source: Source, line: int) -> type[Any
         return None
 
     for attribute in parts[1:]:
-        if attribute == parts[-1]:
-            break
         try:
             descriptor = inspect.getattr_static(receiver_type, attribute)
-            member = getattr(receiver_type, attribute)
         except AttributeError:
-            return None
+            descriptor = None
         if isinstance(descriptor, property):
             annotation = getattr(descriptor.fget, "__annotations__", {}).get("return") if descriptor.fget else None
             receiver_type = annotation if isinstance(annotation, type) else None
-        elif isinstance(member, type):
-            receiver_type = member
-        else:
+        elif descriptor is None:
             annotation = getattr(receiver_type, "__annotations__", {}).get(attribute)
             receiver_type = annotation if isinstance(annotation, type) else None
+        else:
+            member = getattr(receiver_type, attribute, None)
+            if isinstance(member, type):
+                receiver_type = member
+            else:
+                annotation = getattr(receiver_type, "__annotations__", {}).get(attribute)
+                receiver_type = annotation if isinstance(annotation, type) else None
         if receiver_type is None:
             return None
     return receiver_type

@@ -18,7 +18,7 @@ Neovim 中的 Python 运行时文档查询插件。把光标放在函数或对�
 ## 环境要求
 
 - Neovim 0.10 或更新版本（使用 `vim.system`）。
-- Python 3。
+- Python 3.10 或更新版本。
 - 目标库必须能被所选 Python 解释器导入。
 
 插件不安装 Python 包，也不创建虚拟环境。
