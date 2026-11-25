@@ -10,79 +10,13 @@ local defaults = {
   focus = false,
 }
 
-local SCRIPT = [==[
-import ast, builtins, importlib, inspect, sys
-
-path, expr = sys.argv[1], sys.argv[2]
-expr = expr.strip().strip(".")
-
-
-def imported_modules(path):
-    mods = []
-    try:
-        with open(path, encoding="utf-8") as fh:
-            tree = ast.parse(fh.read())
-    except Exception:
-        return mods
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            mods.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            mods.append(node.module)
-    return list(dict.fromkeys(mods))
-
-
-def resolve(expr):
-    parts = expr.split(".")
-    if len(parts) > 1:
-        for i in range(len(parts), 0, -1):
-            try:
-                obj = importlib.import_module(".".join(parts[:i]))
-            except Exception:
-                continue
-            for part in parts[i:]:
-                obj = getattr(obj, part)
-            return expr, obj
-        raise ImportError(parts[0])
-
-    name = parts[0]
-    for module_name in imported_modules(path):
-        candidates = dict.fromkeys((module_name, module_name.split(".")[0]))
-        for candidate in candidates:
-            try:
-                module = importlib.import_module(candidate)
-            except Exception:
-                continue
-            if hasattr(module, name):
-                return f"{candidate}.{name}", getattr(module, name)
-    if hasattr(builtins, name):
-        return name, getattr(builtins, name)
-    raise LookupError(name)
-
-
-try:
-    title, obj = resolve(expr)
-except Exception as exc:
-    print(f"Cannot resolve {expr!r}: {type(exc).__name__}: {exc}")
-    print()
-    print("Tip: place the cursor on a qualified expression such as mujoco.mj_step.")
-    print("Bare names are resolved by searching imports in the current file.")
-    sys.exit(1)
-
-kind = type(obj).__name__
-print(f"{title}    <{kind}>")
-print("-" * max(20, min(len(title) + len(kind) + 8, 78)))
-print()
-doc = inspect.getdoc(obj)
-if doc:
-    print(doc)
-else:
-    try:
-        print(f"signature: {inspect.signature(obj)}")
-    except Exception:
-        pass
-    print("(No docstring available.)")
-]==]
+local function helper_script()
+  local source = debug.getinfo(1, "S").source:sub(2)
+  local module_dir = vim.fs.dirname(source)
+  local lua_dir = vim.fs.dirname(module_dir)
+  local plugin_root = vim.fs.dirname(lua_dir)
+  return plugin_root .. "/python/runtime_doc.py"
+end
 
 local function project_python(file, opts)
   if opts.python and opts.python ~= "" then return opts.python end
@@ -141,13 +75,14 @@ function M.lookup(opts)
   end
 
   local file = vim.api.nvim_buf_get_name(0)
+  local line = vim.api.nvim_win_get_cursor(0)[1]
   local python = project_python(file, opts)
   if python == "" then
     vim.notify("python3 executable not found", vim.log.levels.ERROR)
     return
   end
 
-  vim.system({ python, "-c", SCRIPT, file, expr }, { text = true }, function(result)
+  vim.system({ python, helper_script(), file, expr, tostring(line) }, { text = true }, function(result)
     local text = (result.stdout or "") .. (result.stderr or "")
     if vim.trim(text) == "" then text = ("(No output; exit code %d)"):format(result.code) end
     vim.schedule(function()
@@ -162,8 +97,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("PythonRuntimeDoc", function(args)
     if args.args ~= "" then
       local file = vim.api.nvim_buf_get_name(0)
+      local line = vim.api.nvim_win_get_cursor(0)[1]
       local python = project_python(file, M.config)
-      vim.system({ python, "-c", SCRIPT, file, args.args }, { text = true }, function(result)
+      vim.system({ python, helper_script(), file, args.args, tostring(line) }, { text = true }, function(result)
         local text = (result.stdout or "") .. (result.stderr or "")
         if vim.trim(text) == "" then text = ("(No output; exit code %d)"):format(result.code) end
         vim.schedule(function()
