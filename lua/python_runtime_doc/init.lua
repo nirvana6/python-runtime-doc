@@ -72,9 +72,9 @@ local function parse_popup(stdout)
 end
 
 local function show(lines, opts, on_search_click)
-  -- First call opens unfocused (`nvim_open_win` enter=false). A later call with
-  -- the same focus_id enters that window, matching vim.lsp.buf.hover. Do not
-  -- set close_events: the default CursorMoved dismissal must stay.
+  -- open_floating_preview always creates the window unfocused. Enter it after
+  -- the buffer maps exist. Do not set close_events: CursorMoved must still
+  -- dismiss the float once the cursor returns to the source window.
   local bufnr, winid = vim.lsp.util.open_floating_preview(lines, "markdown", {
     border = opts.border,
     wrap = true,
@@ -97,6 +97,9 @@ local function show(lines, opts, on_search_click)
       end
       pcall(vim.api.nvim_win_set_cursor, winid, { mouse.line, math.max((mouse.column or 1) - 1, 0) })
     end, { buffer = bufnr, silent = true, desc = "Open API documentation search" })
+  end
+  if winid and vim.api.nvim_win_is_valid(winid) then
+    vim.api.nvim_set_current_win(winid)
   end
 end
 
