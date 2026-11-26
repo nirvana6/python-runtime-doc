@@ -38,7 +38,7 @@ Neovim 插件管理器配置：
 }
 ```
 
-默认快捷键为 `<leader>K`。如果 Neovim 使用默认 `mapleader`（空格），按 `Space` 后再按 `K`。直接按 `K` 不会被本插件覆盖。
+在 Python 文件中按一次 `<leader>K`，浮窗会先显示本地运行时文档和签名，底部附带 Google 搜索链接；鼠标左键单击该链接即可打开网页。搜索词由包名和规范 API 名称构成，不包含源码中的局部变量名。若 Neovim 使用默认 `mapleader`（空格），按 `Space` 后按 `K`；普通模式裸 `K` 仍由原有 LSP hover 处理，不会被本插件覆盖。
 
 也可以手动加载：
 
@@ -86,7 +86,7 @@ opts = {
 
 ### 快捷键查询
 
-在 Python 文件中，将光标放到点号表达式上，按 `<leader>K`：
+在 Python 文件中，将光标放到 API 表达式上，按 `<leader>K` 查看当前环境可提供的类型、签名和 docstring；若说明不足，鼠标左键单击浮窗底部的 Google 搜索链接打开搜索结果：
 
 ```python
 mujoco.mj_step(model, data)

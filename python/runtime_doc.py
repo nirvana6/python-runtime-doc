@@ -27,6 +27,7 @@ import importlib
 import inspect
 import sys
 import typing
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1271,6 +1272,13 @@ def search_query(path: str | Path, expression: str, line: int) -> str:
     raise UnresolvedExpression(f"Cannot identify the API behind {expression!r}.")
 
 
+def google_search_link(path: str | Path, expression: str, line: int) -> str:
+    """Return a Google-search Markdown link for a statically identified API."""
+    query = search_query(path, expression, line)
+    url = f"https://www.google.com/search?q={urllib.parse.quote(query, safe='')}"
+    return f"[Google 搜索：{query}]({url})"
+
+
 def lookup(path: str | Path, expression: str, line: int) -> str:
     source = _load_source(path)
     expression = expression.strip().strip(".")
@@ -1335,6 +1343,16 @@ def main(argv: list[str] | None = None) -> int:
         _, path, expression, line_text = args
         try:
             result = search_query(path, expression, int(line_text))
+        except (OSError, SyntaxError, UnresolvedExpression, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(result)
+        return 0
+    if len(args) == 4 and args[0] == "--search-link":
+        _, path, expression, line_text = args
+        try:
+            query = search_query(path, expression, int(line_text))
+            result = f"[Google 搜索：{query}](https://www.google.com/search?q={urllib.parse.quote(query, safe='')})"
         except (OSError, SyntaxError, UnresolvedExpression, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1

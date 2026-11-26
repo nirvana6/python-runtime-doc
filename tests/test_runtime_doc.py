@@ -62,6 +62,14 @@ class RuntimeDocTests(unittest.TestCase):
             runtime_doc.search_query(path, "local_viewer.is_running", 3),
         )
 
+    def test_google_search_markdown_link_appends_to_lookup_result(self) -> None:
+        self._write("import math as m\nm.factorial(5)\n")
+        link = runtime_doc.google_search_link(self.path, "m.factorial", 2)
+        self.assertEqual(
+            "[Google 搜索：math factorial](https://www.google.com/search?q=math%20factorial)",
+            link,
+        )
+
     def test_search_query_refuses_unknown_api_receiver(self) -> None:
         path = self._write("unknown.is_running()\n")
         with self.assertRaises(runtime_doc.UnresolvedExpression):

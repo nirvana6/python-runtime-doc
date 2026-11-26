@@ -1,8 +1,7 @@
 local M = {}
 
 local defaults = {
-  keymap = "<leader>Hd",
-  search_keymap = "<leader>Hg",
+  keymap = "<leader>K",
   filetypes = { "python" },
   python = nil,
   max_width = 100,
@@ -57,14 +56,37 @@ local function expression_under_cursor()
   return word ~= "" and word or nil
 end
 
-local function show(lines, opts)
-  vim.lsp.util.open_floating_preview(lines, "plaintext", {
+local function google_search_link(python, file, expr, line, callback)
+  vim.system(
+    { python, helper_script(), "--search-link", file, expr, tostring(line) },
+    { text = true },
+    function(result)
+      local link = vim.trim(result.stdout or "")
+      vim.schedule(function() callback(result.code == 0 and link ~= "" and link or nil) end)
+    end
+  )
+end
+
+local function show(lines, opts, on_search_click)
+  local bufnr, winid = vim.lsp.util.open_floating_preview(lines, "plaintext", {
     border = opts.border,
     wrap = true,
     focus = opts.focus,
     max_width = math.min(opts.max_width, vim.o.columns - 8),
     max_height = math.min(opts.max_height, vim.o.lines - 6),
   })
+  if on_search_click and bufnr and winid then
+    vim.keymap.set("n", "<LeftMouse>", function()
+      local mouse = vim.fn.getmousepos()
+      if mouse.winid ~= winid or mouse.line ~= #lines then
+        if mouse.winid == winid and mouse.line > 0 then
+          pcall(vim.api.nvim_win_set_cursor, winid, { mouse.line, math.max((mouse.column or 1) - 1, 0) })
+        end
+        return
+      end
+      on_search_click()
+    end, { buffer = bufnr, silent = true, desc = "Open API documentation search" })
+  end
 end
 
 local function current_context()
@@ -91,43 +113,23 @@ function M.lookup(opts)
   vim.system({ python, helper_script(), file, expr, tostring(line) }, { text = true }, function(result)
     local text = (result.stdout or "") .. (result.stderr or "")
     if vim.trim(text) == "" then text = ("(No output; exit code %d)"):format(result.code) end
-    vim.schedule(function()
-      show(vim.split(vim.trim(text, "\n"), "\n", { plain = true }), opts)
-    end)
-  end)
-end
-
-function M.search(opts)
-  opts = vim.tbl_deep_extend("force", defaults, opts or M.config or {})
-  local expr, file, line = current_context()
-  if not expr then return end
-  local python = project_python(file, opts)
-  if python == "" then
-    vim.notify("python3 executable not found", vim.log.levels.ERROR)
-    return
-  end
-
-  vim.system(
-    { python, helper_script(), "--search-query", file, expr, tostring(line) },
-    { text = true },
-    function(result)
-      local query = vim.trim(result.stdout or "")
-      local error_text = vim.trim(result.stderr or "")
+    google_search_link(python, file, expr, line, function(link)
       vim.schedule(function()
-        if result.code ~= 0 or query == "" then
-          local message = error_text ~= "" and error_text or query
-          if message == "" then message = "Could not identify API for search" end
-          vim.notify(message, vim.log.levels.WARN)
-          return
-        end
-        local url = "https://www.google.com/search?q=" .. vim.uri_encode(query)
-        local ok, err = pcall(vim.ui.open, url)
-        if not ok then
-          vim.notify("Could not open Google search: " .. tostring(err), vim.log.levels.ERROR)
+        local lines = vim.split(vim.trim(text, "\n"), "\n", { plain = true })
+        if link then
+          table.insert(lines, "")
+          table.insert(lines, link)
+          local url = link:match("%((https://www%.google%.com/search%?q=[^%)]+)%)$")
+          show(lines, opts, url and function()
+            local ok, err = pcall(vim.ui.open, url)
+            if not ok then vim.notify("Could not open Google search: " .. tostring(err), vim.log.levels.ERROR) end
+          end or nil)
+        else
+          show(lines, opts)
         end
       end)
-    end
-  )
+    end)
+  end)
 end
 
 function M.setup(opts)
@@ -157,13 +159,6 @@ function M.setup(opts)
         vim.keymap.set("n", M.config.keymap, function() M.lookup(M.config) end, {
           buffer = bufnr,
           desc = "Python runtime documentation",
-          silent = true,
-        })
-      end
-      if M.config.search_keymap and M.config.search_keymap ~= "" then
-        vim.keymap.set("n", M.config.search_keymap, function() M.search(M.config) end, {
-          buffer = bufnr,
-          desc = "Search official documentation for Python API",
           silent = true,
         })
       end
