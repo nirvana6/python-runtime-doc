@@ -1200,6 +1200,77 @@ def _resolve_dotted_module(expression: str, source: Source) -> str | None:
     return "\n".join(lines)
 
 
+def _search_terms(module_name: str, symbol: str) -> str:
+    """Build a short query from the owning package and canonical API symbol."""
+    package = module_name.split(".", maxsplit=1)[0]
+    if package == "builtins":
+        return f"Python {symbol}"
+    return f"{package} {symbol}"
+
+
+def _search_terms_for_object(value: Any, fallback_symbol: str) -> str | None:
+    """Return package + symbol for an imported runtime object, if identifiable."""
+    if inspect.ismodule(value):
+        module_name = value.__name__
+        return _search_terms(module_name, module_name.rsplit(".", maxsplit=1)[-1])
+
+    owner = getattr(value, "__objclass__", None)
+    module_name = getattr(owner, "__module__", None) or getattr(value, "__module__", None)
+    if not isinstance(module_name, str) or not module_name:
+        return None
+    symbol = getattr(value, "__name__", None) or fallback_symbol
+    return _search_terms(module_name, symbol)
+
+
+def search_query(path: str | Path, expression: str, line: int) -> str:
+    """Return concise search terms for the canonical API under the cursor.
+
+    Caller-local receiver names, signatures, and package versions are excluded.
+    The queried source is parsed and its imports are resolved using the same
+    runtime environment as :func:`lookup`.
+    """
+    source = _load_source(path)
+    expression = expression.strip().strip(".")
+    parts = expression.split(".")
+
+    if len(parts) > 1:
+        imported = _resolve_imported_name(expression, source.aliases)
+        if imported is not None:
+            query = _search_terms_for_object(imported, parts[-1])
+            if query is not None:
+                return query
+
+        receiver_type = _infer_receiver_type(".".join(parts[:-1]), source, line)
+        if receiver_type is None:
+            raise UnresolvedExpression(
+                f"Cannot identify the API behind {expression!r}; its receiver type is unknown."
+            )
+        return _search_terms(receiver_type.__module__, parts[-1])
+
+    scope, _owner = _scope_nodes(source.tree, line)
+    bound, inferred = _name_binding(expression, source, line, scope)
+    if bound:
+        if inferred is None:
+            raise UnresolvedExpression(
+                f"Cannot identify the API behind {expression!r}; its type is unknown."
+            )
+        return _search_terms(inferred.origin.__module__, inferred.origin.__name__)
+
+    imported = _resolve_imported_name(expression, source.aliases)
+    if imported is not None:
+        query = _search_terms_for_object(imported, expression)
+        if query is not None:
+            return query
+
+    builtin = getattr(builtins, expression, None)
+    if builtin is not None:
+        query = _search_terms_for_object(builtin, expression)
+        if query is not None:
+            return query
+
+    raise UnresolvedExpression(f"Cannot identify the API behind {expression!r}.")
+
+
 def lookup(path: str | Path, expression: str, line: int) -> str:
     source = _load_source(path)
     expression = expression.strip().strip(".")
@@ -1260,8 +1331,18 @@ def lookup(path: str | Path, expression: str, line: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if len(args) == 4 and args[0] == "--search-query":
+        _, path, expression, line_text = args
+        try:
+            result = search_query(path, expression, int(line_text))
+        except (OSError, SyntaxError, UnresolvedExpression, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(result)
+        return 0
     if len(args) != 3:
         print("Usage: runtime_doc.py SOURCE_FILE EXPRESSION LINE", file=sys.stderr)
+        print("       runtime_doc.py --search-query SOURCE_FILE EXPRESSION LINE", file=sys.stderr)
         return 2
     path, expression, line_text = args
     try:

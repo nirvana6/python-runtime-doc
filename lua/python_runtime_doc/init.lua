@@ -1,7 +1,8 @@
 local M = {}
 
 local defaults = {
-  keymap = "<leader>K",
+  keymap = "<leader>Hd",
+  search_keymap = "<leader>Hg",
   filetypes = { "python" },
   python = nil,
   max_width = 100,
@@ -66,16 +67,21 @@ local function show(lines, opts)
   })
 end
 
-function M.lookup(opts)
-  opts = vim.tbl_deep_extend("force", defaults, opts or M.config or {})
+local function current_context()
   local expr = expression_under_cursor()
   if not expr then
     vim.notify("No name under cursor", vim.log.levels.WARN)
-    return
+    return nil
   end
-
   local file = vim.api.nvim_buf_get_name(0)
   local line = vim.api.nvim_win_get_cursor(0)[1]
+  return expr, file, line
+end
+
+function M.lookup(opts)
+  opts = vim.tbl_deep_extend("force", defaults, opts or M.config or {})
+  local expr, file, line = current_context()
+  if not expr then return end
   local python = project_python(file, opts)
   if python == "" then
     vim.notify("python3 executable not found", vim.log.levels.ERROR)
@@ -89,6 +95,39 @@ function M.lookup(opts)
       show(vim.split(vim.trim(text, "\n"), "\n", { plain = true }), opts)
     end)
   end)
+end
+
+function M.search(opts)
+  opts = vim.tbl_deep_extend("force", defaults, opts or M.config or {})
+  local expr, file, line = current_context()
+  if not expr then return end
+  local python = project_python(file, opts)
+  if python == "" then
+    vim.notify("python3 executable not found", vim.log.levels.ERROR)
+    return
+  end
+
+  vim.system(
+    { python, helper_script(), "--search-query", file, expr, tostring(line) },
+    { text = true },
+    function(result)
+      local query = vim.trim(result.stdout or "")
+      local error_text = vim.trim(result.stderr or "")
+      vim.schedule(function()
+        if result.code ~= 0 or query == "" then
+          local message = error_text ~= "" and error_text or query
+          if message == "" then message = "Could not identify API for search" end
+          vim.notify(message, vim.log.levels.WARN)
+          return
+        end
+        local url = "https://www.google.com/search?q=" .. vim.uri_encode(query)
+        local ok, err = pcall(vim.ui.open, url)
+        if not ok then
+          vim.notify("Could not open Google search: " .. tostring(err), vim.log.levels.ERROR)
+        end
+      end)
+    end
+  )
 end
 
 function M.setup(opts)
@@ -113,13 +152,21 @@ function M.setup(opts)
 
   if M.config.filetypes and #M.config.filetypes > 0 then
     local function attach(bufnr)
-      if not M.config.keymap or M.config.keymap == "" then return end
       if not vim.tbl_contains(M.config.filetypes, vim.bo[bufnr].filetype) then return end
-      vim.keymap.set("n", M.config.keymap, function() M.lookup(M.config) end, {
-        buffer = bufnr,
-        desc = "Python runtime documentation",
-        silent = true,
-      })
+      if M.config.keymap and M.config.keymap ~= "" then
+        vim.keymap.set("n", M.config.keymap, function() M.lookup(M.config) end, {
+          buffer = bufnr,
+          desc = "Python runtime documentation",
+          silent = true,
+        })
+      end
+      if M.config.search_keymap and M.config.search_keymap ~= "" then
+        vim.keymap.set("n", M.config.search_keymap, function() M.search(M.config) end, {
+          buffer = bufnr,
+          desc = "Search official documentation for Python API",
+          silent = true,
+        })
+      end
     end
 
     local group = vim.api.nvim_create_augroup("PythonRuntimeDoc", { clear = true })

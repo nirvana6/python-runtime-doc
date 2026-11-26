@@ -36,6 +36,48 @@ class RuntimeDocTests(unittest.TestCase):
         self.assertIn("factorial(n, /)", result)
         self.assertIn("Find n!.", result)
 
+    def test_search_query_uses_canonical_module_name_for_aliased_function(self) -> None:
+        path = self._write("import math as m\nm.factorial(5)\n")
+        self.assertEqual("math factorial", runtime_doc.search_query(path, "m.factorial", 2))
+
+    def test_search_query_uses_package_and_method_not_local_receiver(self) -> None:
+        fixture = Path(self.temp_dir.name) / "doc_fixture.py"
+        fixture.write_text(
+            "class Handle:\n"
+            "    def is_running(self) -> bool:\n"
+            "        return True\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "doc_fixture", None)
+        path = self._write(
+            "from doc_fixture import Handle\n"
+            "def check(local_viewer: Handle) -> None:\n"
+            "    local_viewer.is_running()\n"
+        )
+        self.assertEqual(
+            "doc_fixture is_running",
+            runtime_doc.search_query(path, "local_viewer.is_running", 3),
+        )
+
+    def test_search_query_refuses_unknown_api_receiver(self) -> None:
+        path = self._write("unknown.is_running()\n")
+        with self.assertRaises(runtime_doc.UnresolvedExpression):
+            runtime_doc.search_query(path, "unknown.is_running", 1)
+
+    def test_search_query_cli_prints_only_search_terms(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        path = self._write("import math as m\nm.factorial(5)\n")
+        output = StringIO()
+        with redirect_stdout(output):
+            result = runtime_doc.main(["--search-query", str(path), "m.factorial", "2"])
+        self.assertEqual(0, result)
+        self.assertEqual("math factorial\n", output.getvalue())
+
     def test_nested_object_method_with_imported_type_annotation(self) -> None:
         self.path.write_text(
             "from pathlib import Path\n"
