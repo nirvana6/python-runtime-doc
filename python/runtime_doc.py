@@ -1279,6 +1279,31 @@ def google_search_link(path: str | Path, expression: str, line: int) -> str:
     return f"[Google 搜索：{query}]({url})"
 
 
+def _emit_popup(path: str | Path, expression: str, line: int) -> int:
+    """Write lookup text and an optional search link for one process spawn.
+
+    The stdout frame is ``<utf8-byte-length>\\n`` + text + ``\\n`` + link + ``\\n``.
+    A failed search leaves the link line empty and does not change the exit code,
+    matching the previous separate ``--search-link`` call.
+    """
+    try:
+        text = lookup(path, expression, line)
+        code = 0
+    except (OSError, SyntaxError, UnresolvedExpression, ValueError) as exc:
+        text = str(exc)
+        code = 1
+    try:
+        link = google_search_link(path, expression, line)
+    except (OSError, SyntaxError, UnresolvedExpression, ValueError):
+        link = ""
+    sys.stdout.write(f"{len(text.encode('utf-8'))}\n")
+    sys.stdout.write(text)
+    sys.stdout.write("\n")
+    sys.stdout.write(link)
+    sys.stdout.write("\n")
+    return code
+
+
 def lookup(path: str | Path, expression: str, line: int) -> str:
     source = _load_source(path)
     expression = expression.strip().strip(".")
@@ -1358,9 +1383,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(result)
         return 0
+    if len(args) == 4 and args[0] == "--with-search-link":
+        _, path, expression, line_text = args
+        try:
+            return _emit_popup(path, expression, int(line_text))
+        except ValueError as exc:
+            print(str(exc))
+            return 1
     if len(args) != 3:
         print("Usage: runtime_doc.py SOURCE_FILE EXPRESSION LINE", file=sys.stderr)
         print("       runtime_doc.py --search-query SOURCE_FILE EXPRESSION LINE", file=sys.stderr)
+        print("       runtime_doc.py --with-search-link SOURCE_FILE EXPRESSION LINE", file=sys.stderr)
         return 2
     path, expression, line_text = args
     try:

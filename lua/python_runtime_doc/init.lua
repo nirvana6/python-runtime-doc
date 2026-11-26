@@ -56,15 +56,19 @@ local function expression_under_cursor()
   return word ~= "" and word or nil
 end
 
-local function google_search_link(python, file, expr, line, callback)
-  vim.system(
-    { python, helper_script(), "--search-link", file, expr, tostring(line) },
-    { text = true },
-    function(result)
-      local link = vim.trim(result.stdout or "")
-      vim.schedule(function() callback(result.code == 0 and link ~= "" and link or nil) end)
-    end
-  )
+local function parse_popup(stdout)
+  -- Length is UTF-8 bytes. Lua patterns cannot scan the body: `.` stops at newline.
+  stdout = stdout or ""
+  local newline = stdout:find("\n", 1, true)
+  if not newline or newline == 1 then return nil, nil end
+  local header = stdout:sub(1, newline - 1)
+  if not header:match("^%d+$") then return nil, nil end
+  local n = tonumber(header)
+  local rest = stdout:sub(newline + 1)
+  if not n or n < 0 or n > #rest or rest:sub(n + 1, n + 1) ~= "\n" then return nil, nil end
+  local text = rest:sub(1, n)
+  local link = vim.trim(rest:sub(n + 2))
+  return text, link ~= "" and link or nil
 end
 
 local function show(lines, opts, on_search_click)
@@ -117,26 +121,35 @@ function M.lookup(opts)
     return
   end
 
-  vim.system({ python, helper_script(), file, expr, tostring(line) }, { text = true }, function(result)
-    local text = (result.stdout or "") .. (result.stderr or "")
-    if vim.trim(text) == "" then text = ("(No output; exit code %d)"):format(result.code) end
-    google_search_link(python, file, expr, line, function(link)
+  vim.system(
+    { python, helper_script(), "--with-search-link", file, expr, tostring(line) },
+    { text = true },
+    function(result)
+      local text, link = parse_popup(result.stdout)
+      if not text then
+        text = (result.stdout or "") .. (result.stderr or "")
+        link = nil
+      elseif result.stderr and result.stderr ~= "" then
+        -- The old doc process appended stderr before the link was added.
+        text = text .. "\n" .. result.stderr
+      end
+      if vim.trim(text) == "" then text = ("(No output; exit code %d)"):format(result.code) end
       vim.schedule(function()
         local lines = vim.split(vim.trim(text, "\n"), "\n", { plain = true })
-        if link then
+        local url = link and link:match("%((https://www%.google%.com/search%?q=[^%)]+)%)$")
+        if url then
           table.insert(lines, "")
           table.insert(lines, link)
-          local url = link:match("%((https://www%.google%.com/search%?q=[^%)]+)%)$")
-          show(lines, opts, url and function()
+          show(lines, opts, function()
             local ok, err = pcall(vim.ui.open, url)
             if not ok then vim.notify("Could not open Google search: " .. tostring(err), vim.log.levels.ERROR) end
-          end or nil)
+          end)
         else
           show(lines, opts)
         end
       end)
-    end)
-  end)
+    end
+  )
 end
 
 function M.setup(opts)

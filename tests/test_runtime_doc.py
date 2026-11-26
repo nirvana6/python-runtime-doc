@@ -75,6 +75,65 @@ class RuntimeDocTests(unittest.TestCase):
         with self.assertRaises(runtime_doc.UnresolvedExpression):
             runtime_doc.search_query(path, "unknown.is_running", 1)
 
+    def test_with_search_link_cli_returns_lookup_text_and_link(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        path = self._write("import math as m\nm.factorial(5)\n")
+        output = StringIO()
+        with redirect_stdout(output):
+            code = runtime_doc.main(["--with-search-link", str(path), "m.factorial", "2"])
+        self.assertEqual(0, code)
+        raw = output.getvalue()
+        length_text, rest = raw.split("\n", 1)
+        length = int(length_text)
+        rest_bytes = rest.encode("utf-8")
+        text = rest_bytes[:length].decode("utf-8")
+        link = rest_bytes[length + 1 :].decode("utf-8").removesuffix("\n")
+        self.assertEqual(runtime_doc.lookup(path, "m.factorial", 2), text)
+        self.assertEqual(runtime_doc.google_search_link(path, "m.factorial", 2), link)
+
+    def test_with_search_link_cli_roundtrips_non_ascii_text(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        fixture = Path(self.temp_dir.name) / "uni_mod.py"
+        fixture.write_text('def ping():\n    """你好 café"""\n    return 1\n', encoding="utf-8")
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "uni_mod", None)
+        path = self._write("import uni_mod\nuni_mod.ping()\n")
+        output = StringIO()
+        with redirect_stdout(output):
+            code = runtime_doc.main(["--with-search-link", str(path), "uni_mod.ping", "2"])
+        self.assertEqual(0, code)
+        raw = output.getvalue()
+        length_text, rest = raw.split("\n", 1)
+        length = int(length_text)
+        rest_bytes = rest.encode("utf-8")
+        text = rest_bytes[:length].decode("utf-8")
+        self.assertEqual(runtime_doc.lookup(path, "uni_mod.ping", 2), text)
+        self.assertIn("你好 café", text)
+
+    def test_with_search_link_cli_keeps_lookup_error_without_a_link(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        path = self._write("unknown.append(value)\n")
+        output = StringIO()
+        with redirect_stdout(output):
+            code = runtime_doc.main(["--with-search-link", str(path), "unknown.append", "1"])
+        self.assertEqual(1, code)
+        raw = output.getvalue()
+        length_text, rest = raw.split("\n", 1)
+        length = int(length_text)
+        rest_bytes = rest.encode("utf-8")
+        text = rest_bytes[:length].decode("utf-8")
+        link = rest_bytes[length + 1 :].decode("utf-8").removesuffix("\n")
+        self.assertIn("Cannot infer the receiver type", text)
+        self.assertEqual("", link)
+
     def test_search_query_cli_prints_only_search_terms(self) -> None:
         from contextlib import redirect_stdout
         from io import StringIO
