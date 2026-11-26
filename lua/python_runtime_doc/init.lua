@@ -68,10 +68,14 @@ local function google_search_link(python, file, expr, line, callback)
 end
 
 local function show(lines, opts, on_search_click)
+  -- First call opens unfocused (`nvim_open_win` enter=false). A later call with
+  -- the same focus_id enters that window, matching vim.lsp.buf.hover. Do not
+  -- set close_events: the default CursorMoved dismissal must stay.
   local bufnr, winid = vim.lsp.util.open_floating_preview(lines, "markdown", {
     border = opts.border,
     wrap = true,
-    focus = opts.focus,
+    focus = true,
+    focus_id = "python_runtime_doc",
     max_width = math.min(opts.max_width, vim.o.columns - 8),
     max_height = math.min(opts.max_height, vim.o.lines - 6),
   })
