@@ -68,7 +68,7 @@ local function google_search_link(python, file, expr, line, callback)
 end
 
 local function show(lines, opts, on_search_click)
-  local bufnr, winid = vim.lsp.util.open_floating_preview(lines, "plaintext", {
+  local bufnr, winid = vim.lsp.util.open_floating_preview(lines, "markdown", {
     border = opts.border,
     wrap = true,
     focus = opts.focus,
@@ -78,13 +78,16 @@ local function show(lines, opts, on_search_click)
   if on_search_click and bufnr and winid then
     vim.keymap.set("n", "<LeftMouse>", function()
       local mouse = vim.fn.getmousepos()
-      if mouse.winid ~= winid or mouse.line ~= #lines then
-        if mouse.winid == winid and mouse.line > 0 then
-          pcall(vim.api.nvim_win_set_cursor, winid, { mouse.line, math.max((mouse.column or 1) - 1, 0) })
-        end
+      if mouse.winid ~= winid or mouse.line <= 0 then
         return
       end
-      on_search_click()
+      local ok, buf_lines = pcall(vim.api.nvim_buf_get_lines, bufnr, mouse.line - 1, mouse.line, false)
+      local buf_line = (ok and buf_lines[1]) or ""
+      if buf_line:find("https://www%.google%.com/search", 1) then
+        on_search_click()
+        return
+      end
+      pcall(vim.api.nvim_win_set_cursor, winid, { mouse.line, math.max((mouse.column or 1) - 1, 0) })
     end, { buffer = bufnr, silent = true, desc = "Open API documentation search" })
   end
 end
