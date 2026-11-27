@@ -33,8 +33,9 @@ class RuntimeDocTests(unittest.TestCase):
     def test_module_function_remains_supported(self) -> None:
         self.path.write_text("import math\nmath.factorial(5)\n", encoding="utf-8")
         result = runtime_doc.lookup(self.path, "math.factorial", 2)
-        self.assertIn("factorial(n, /)", result)
+        self.assertIn("```python\n(function) factorial: def factorial(n, /)\n```", result)
         self.assertIn("Find n!.", result)
+        self.assertGreater(result.index("Find n!."), result.index("```python"))
 
     def test_search_query_uses_canonical_module_name_for_aliased_function(self) -> None:
         path = self._write("import math as m\nm.factorial(5)\n")
@@ -92,6 +93,31 @@ class RuntimeDocTests(unittest.TestCase):
         link = rest_bytes[length + 1 :].decode("utf-8").removesuffix("\n")
         self.assertEqual(runtime_doc.lookup(path, "m.factorial", 2), text)
         self.assertEqual(runtime_doc.google_search_link(path, "m.factorial", 2), link)
+
+    def test_signature_fence_stays_out_of_the_search_link_frame(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        path = self._write("import math as m\nm.factorial(5)\n")
+        output = StringIO()
+        with redirect_stdout(output):
+            code = runtime_doc.main(["--with-search-link", str(path), "m.factorial", "2"])
+        self.assertEqual(0, code)
+        raw = output.getvalue()
+        length_text, rest = raw.split("\n", 1)
+        length = int(length_text)
+        rest_bytes = rest.encode("utf-8")
+        text = rest_bytes[:length].decode("utf-8")
+        self.assertEqual(rest_bytes[length : length + 1], b"\n")
+        link = rest_bytes[length + 1 :].decode("utf-8").removesuffix("\n")
+        self.assertIn("```python\n(function) factorial: def factorial(n, /)\n```", text)
+        self.assertNotIn("```", link)
+        self.assertNotIn("https://www.google.com/search", text)
+        self.assertEqual(
+            "[Google 搜索：math factorial](https://www.google.com/search?q=math%20factorial)",
+            link,
+        )
+        self.assertEqual(length, len(text.encode("utf-8")))
 
     def test_with_search_link_cli_roundtrips_non_ascii_text(self) -> None:
         from contextlib import redirect_stdout
@@ -584,7 +610,21 @@ class RuntimeDocTests(unittest.TestCase):
         self.assertIn("Number of bits necessary to represent self in binary.", receiver)
         bare = runtime_doc.lookup(path, "id", 3)
         self.assertIn("id    <builtins.int>", bare)
+        self.assertIn("```python\n(class) int: class int([x]) -> integer\n```", bare)
+        self.assertNotIn("class id(", bare)
         self.assertNotIn("Return the identity of an object.", bare)
+
+    def test_bound_bare_name_without_docstring_keeps_placeholder(self) -> None:
+        fixture = Path(self.temp_dir.name) / "nodoc_type.py"
+        fixture.write_text("class Bare:\n    pass\n", encoding="utf-8")
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "nodoc_type", None)
+        path = self._write("from nodoc_type import Bare\nholder = Bare()\nholder\n")
+        result = runtime_doc.lookup(path, "holder", 3)
+        self.assertIn("holder    <nodoc_type.Bare>", result)
+        self.assertIn("```python\n(class) Bare: class Bare()\n```\n(No docstring available.)", result)
 
     def test_annotation_without_value_records_declared_container_type(self) -> None:
         # PEP 526 declaration only: the *declared* type documents the name,
@@ -732,6 +772,148 @@ class RuntimeDocTests(unittest.TestCase):
         )
         result = runtime_doc.lookup(path, "y.upper", 5)
         self.assertIn("Return a copy of the string converted to uppercase.", result)
+
+    def test_annotated_function_signature_keeps_parameter_types(self) -> None:
+        fixture = Path(self.temp_dir.name) / "sig_ann.py"
+        fixture.write_text(
+            "def ping(name: str, times: int = 1) -> bool:\n"
+            '    """Wave."""\n'
+            "    return True\n"
+            "\n"
+            "class Handle:\n"
+            "    def is_running(self, timeout: float | None = None) -> bool:\n"
+            '        """Report state."""\n'
+            "        return True\n"
+            "\n"
+            "    @classmethod\n"
+            "    def build(cls, label: str) -> bool:\n"
+            '        """Make one."""\n'
+            "        return True\n"
+            "\n"
+            "    @staticmethod\n"
+            "    def flag(enabled: bool = False) -> int:\n"
+            '        """Toggle."""\n'
+            "        return 1\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "sig_ann", None)
+        path = self._write(
+            "import sig_ann\n"
+            "from sig_ann import Handle\n"
+            "def check(local_viewer: Handle) -> None:\n"
+            "    sig_ann.ping('a')\n"
+            "    local_viewer.is_running()\n"
+            "    local_viewer.build('a')\n"
+            "    local_viewer.flag()\n"
+        )
+        ping = runtime_doc.lookup(path, "sig_ann.ping", 4)
+        self.assertIn("(function) ping: def ping(name: str, times: int = 1) -> bool", ping)
+        self.assertIn("Wave.", ping)
+        running = runtime_doc.lookup(path, "local_viewer.is_running", 5)
+        self.assertIn(
+            "(method) is_running: def is_running(timeout: float | None = None) -> bool",
+            running,
+        )
+        self.assertNotIn("(self", running)
+        self.assertIn("Report state.", running)
+        built = runtime_doc.lookup(path, "local_viewer.build", 6)
+        self.assertIn("(classmethod) build: def build(label: str) -> bool", built)
+        self.assertIn("Make one.", built)
+        flagged = runtime_doc.lookup(path, "local_viewer.flag", 7)
+        self.assertIn("(staticmethod) flag: def flag(enabled: bool = False) -> int", flagged)
+
+    def test_method_without_docstring_still_shows_signature_line(self) -> None:
+        fixture = Path(self.temp_dir.name) / "sig_bare.py"
+        fixture.write_text(
+            "class Handle:\n"
+            "    def is_running(self) -> bool:\n"
+            "        return True\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "sig_bare", None)
+        path = self._write(
+            "from sig_bare import Handle\n"
+            "def check(local_viewer: Handle) -> None:\n"
+            "    local_viewer.is_running()\n"
+        )
+        result = runtime_doc.lookup(path, "local_viewer.is_running", 3)
+        self.assertIn(
+            "```python\n(method) is_running: def is_running() -> bool\n```\n(No docstring available.)",
+            result,
+        )
+
+    def test_docstring_signature_promoted_when_inspect_signature_missing(self) -> None:
+        rendered, body = runtime_doc._signature_from_docstring(
+            "mj_step",
+            "mj_step(m: mujoco._structs.MjModel, d: mujoco._structs.MjData, "
+            "nstep: typing.SupportsInt | typing.SupportsIndex = 1) -> None\n"
+            "\n"
+            "Advance simulation.\n",
+        )
+        self.assertEqual(
+            "(m: mujoco._structs.MjModel, d: mujoco._structs.MjData, "
+            "nstep: typing.SupportsInt | typing.SupportsIndex = 1) -> None",
+            rendered,
+        )
+        self.assertEqual("Advance simulation.", body)
+        untouched, prose = runtime_doc._signature_from_docstring("factorial", "Find n!.")
+        self.assertIsNone(untouched)
+        self.assertEqual("Find n!.", prose)
+
+        fixture = Path(self.temp_dir.name) / "sig_doc.py"
+        fixture.write_text(
+            "def apply(fn, n=1):\n"
+            '    """apply(fn: typing.Callable[[int], str], n: int = 1) -> Callable[[int], str]\n'
+            "\n"
+            "    Run fn.\n"
+            '    """\n'
+            "    return fn\n"
+            "apply.__signature__ = 0\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, self.temp_dir.name)
+        self.addCleanup(sys.path.remove, self.temp_dir.name)
+        importlib.invalidate_caches()
+        self.addCleanup(sys.modules.pop, "sig_doc", None)
+        path = self._write("import sig_doc\nsig_doc.apply(int)\n")
+        result = runtime_doc.lookup(path, "sig_doc.apply", 2)
+        self.assertIn(
+            "(function) apply: def apply(fn: typing.Callable[[int], str], n: int = 1) "
+            "-> Callable[[int], str]",
+            result,
+        )
+        self.assertIn("Run fn.", result)
+        closing = result.rfind("```")
+        self.assertNotIn("apply(fn:", result[closing + 3 :])
+
+    def test_time_sleep_signature_line_follows_runtime_inspect(self) -> None:
+        import inspect
+        import time
+
+        path = self._write("import time\ntime.sleep(0)\n")
+        result = runtime_doc.lookup(path, "time.sleep", 2)
+        try:
+            rendered = str(inspect.signature(time.sleep))
+        except (TypeError, ValueError):
+            self.assertIn("(function) sleep: def sleep(seconds)", result)
+            self.assertNotIn("sleep(seconds)", result.splitlines())
+        else:
+            self.assertIn(f"(function) sleep: def sleep{rendered}", result)
+        self.assertIn("Delay execution for a given number of seconds.", result)
+
+    def test_noncallable_value_has_no_signature_line(self) -> None:
+        path = self._write("import math\nmath.pi\n")
+        result = runtime_doc.lookup(path, "math.pi", 2)
+        self.assertNotIn("(function)", result)
+        self.assertNotIn(": def ", result)
+        self.assertNotIn(": class ", result)
+        self.assertNotIn("```", result)
 
 
 if __name__ == "__main__":

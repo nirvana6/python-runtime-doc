@@ -1148,6 +1148,103 @@ def _infer_receiver_type(expression: str, source: Source, line: int) -> type[Any
     return receiver_type
 
 
+def _split_documented_signature(line: str) -> tuple[str, str, str] | None:
+    """Parse ``name(params)`` or ``name(params) -> ret`` from one docstring line."""
+    text = line.strip()
+    paren = text.find("(")
+    if paren <= 0:
+        return None
+    documented = text[:paren].strip()
+    if not documented or not all(part.isidentifier() for part in documented.split(".")):
+        return None
+    depth = 0
+    for index, char in enumerate(text[paren:], start=paren):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                params = text[paren + 1 : index]
+                rest = text[index + 1 :].strip()
+                if not rest:
+                    return documented, params, ""
+                if not rest.startswith("->"):
+                    return None
+                returned = rest[2:].strip()
+                if not returned:
+                    return None
+                return documented, params, returned
+    return None
+
+
+def _signature_from_docstring(name: str, doc: str | None) -> tuple[str | None, str | None]:
+    """Promote a leading ``name(...)`` line when the object has no inspect signature.
+
+    CPython builtins and pybind11 functions often publish parameter names and
+    annotations as the first docstring line instead of ``__text_signature__``.
+    Returns ``(rendered_signature, remaining_doc)``. Prose is left unchanged.
+    """
+    if not doc:
+        return None, doc
+    lines = doc.splitlines()
+    parsed = _split_documented_signature(lines[0])
+    if parsed is None:
+        return None, doc
+    documented, params, returned = parsed
+    if documented.rsplit(".", 1)[-1] != name:
+        return None, doc
+    rendered = f"({params})"
+    if returned:
+        rendered += f" -> {returned}"
+    rest = lines[1:]
+    if rest and not rest[0].strip():
+        rest = rest[1:]
+    body = "\n".join(rest).strip()
+    return rendered, body or None
+
+
+def _rendered_inspect_signature(value: Any, *, drop_binding: bool) -> str | None:
+    """Return ``inspect.signature`` text, dropping a leading ``self`` when asked."""
+    try:
+        signature = inspect.signature(value)
+    except (TypeError, ValueError):
+        return None
+    if drop_binding:
+        parameters = list(signature.parameters.values())
+        if parameters and parameters[0].kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            signature = signature.replace(parameters=parameters[1:])
+    return str(signature)
+
+
+def _signature_and_doc(
+    name: str,
+    value: Any,
+    *,
+    kind: str,
+    doc: str | None,
+    drop_binding: bool = False,
+) -> tuple[str, str | None]:
+    """Build a fenced ``(kind) name: def name(...)`` block from the runtime callable.
+
+    Parameter names and annotations are whatever ``inspect.signature`` exposes.
+    When that fails, a docstring signature is promoted. Annotations that the
+    runtime object does not carry are left off; stubs are not consulted.
+    The line is wrapped in a ``python`` fence so the markdown float's
+    tree-sitter injection highlights it. The docstring stays outside the fence.
+    """
+    rendered = _rendered_inspect_signature(value, drop_binding=drop_binding)
+    if rendered is None:
+        rendered, doc = _signature_from_docstring(name, doc)
+    if rendered is None:
+        rendered = "(...)"
+    keyword = "class" if kind == "class" else "def"
+    line = f"({kind}) {name}: {keyword} {name}{rendered}"
+    return f"```python\n{line}\n```", doc
+
+
 def _format_method(type_obj: type[Any], method_name: str, expression: str) -> str:
     descriptor = inspect.getattr_static(type_obj, method_name)
     method = getattr(type_obj, method_name)
@@ -1156,20 +1253,17 @@ def _format_method(type_obj: type[Any], method_name: str, expression: str) -> st
 
     title = f"{type_obj.__module__}.{type_obj.__qualname__}.{method_name}"
     lines = [f"{title}    <method of {type_obj.__qualname__}>", "-" * max(20, min(len(title) + 20, 78)), ""]
-    try:
-        signature = inspect.signature(method)
-        if not isinstance(descriptor, (staticmethod, classmethod)):
-            parameters = list(signature.parameters.values())
-            if parameters and parameters[0].kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            ):
-                signature = signature.replace(parameters=parameters[1:])
-        lines.append(f"{method_name}{signature}")
-    except (TypeError, ValueError):
-        pass
-
+    if isinstance(descriptor, classmethod):
+        kind, drop_binding = "classmethod", False
+    elif isinstance(descriptor, staticmethod):
+        kind, drop_binding = "staticmethod", False
+    else:
+        kind, drop_binding = "method", True
     doc = inspect.getdoc(method) or inspect.getdoc(descriptor)
+    signature_line, doc = _signature_and_doc(
+        method_name, method, kind=kind, doc=doc, drop_binding=drop_binding
+    )
+    lines.append(signature_line)
     if doc:
         lines.extend(["", *doc.splitlines()])
     else:
@@ -1187,16 +1281,18 @@ def _resolve_dotted_module(expression: str, source: Source) -> str | None:
     kind = type(value).__name__
     title = _expand_alias(expression, source.aliases)
     doc = inspect.getdoc(value)
-    try:
-        signature = inspect.signature(value)
-    except (TypeError, ValueError):
-        signature = None
     lines = [f"{title}    <{kind}>", "-" * max(20, min(len(title) + len(kind) + 8, 78)), ""]
-    if signature is not None:
-        lines.append(f"{parts[-1]}{signature}")
+    if callable(value):
+        signature_line, doc = _signature_and_doc(
+            parts[-1],
+            value,
+            kind="class" if inspect.isclass(value) else "function",
+            doc=doc,
+        )
+        lines.append(signature_line)
     if doc:
         lines.extend(["", *doc.splitlines()])
-    elif signature is None:
+    elif not callable(value):
         lines.append("(No docstring or signature available.)")
     return "\n".join(lines)
 
@@ -1337,27 +1433,60 @@ def lookup(path: str | Path, expression: str, line: int) -> str:
                 "Its binding is not statically provable."
             )
         origin = inferred.origin
-        return f"{expression}    <{origin.__module__}.{origin.__qualname__}>\n\n{inspect.getdoc(origin) or '(No docstring available.)'}"
+        doc = inspect.getdoc(origin)
+        lines = [f"{expression}    <{origin.__module__}.{origin.__qualname__}>", ""]
+        if callable(origin):
+            # The queried word is a local variable. The callable being
+            # documented is its type, so the signature must use that type's
+            # name. Naming it after the variable both mislabels the constructor
+            # and blocks a docstring signature such as ``int([x])``.
+            signature_line, doc = _signature_and_doc(
+                origin.__name__,
+                origin,
+                kind="class" if inspect.isclass(origin) else "function",
+                doc=doc,
+            )
+            lines.append(signature_line)
+        if doc:
+            lines.extend(["", *doc.splitlines()])
+        else:
+            lines.append("(No docstring available.)")
+        return "\n".join(lines)
 
     imported_result = _resolve_imported_name(expression, source.aliases)
     if imported_result is not None:
         title = _expand_alias(expression, source.aliases)
         doc = inspect.getdoc(imported_result)
-        try:
-            signature = inspect.signature(imported_result)
-        except (TypeError, ValueError):
-            signature = None
         lines = [f"{title}    <{type(imported_result).__name__}>", "-" * max(20, len(title) + 10), ""]
-        if signature is not None:
-            lines.append(f"{expression}{signature}")
+        if callable(imported_result):
+            signature_line, doc = _signature_and_doc(
+                expression,
+                imported_result,
+                kind="class" if inspect.isclass(imported_result) else "function",
+                doc=doc,
+            )
+            lines.append(signature_line)
         if doc:
             lines.extend(["", *doc.splitlines()])
         return "\n".join(lines)
 
     builtin = getattr(builtins, expression, None)
     if builtin is not None:
-        doc = inspect.getdoc(builtin) or "(No docstring available.)"
-        return f"{expression}    <{type(builtin).__name__}>\n\n{doc}"
+        doc = inspect.getdoc(builtin)
+        if callable(builtin):
+            signature_line, doc = _signature_and_doc(
+                expression,
+                builtin,
+                kind="class" if inspect.isclass(builtin) else "function",
+                doc=doc,
+            )
+            if doc:
+                body = f"{signature_line}\n\n{doc}"
+            else:
+                body = f"{signature_line}\n(No docstring available.)"
+        else:
+            body = doc or "(No docstring available.)"
+        return f"{expression}    <{type(builtin).__name__}>\n\n{body}"
 
     raise UnresolvedExpression(f"Cannot resolve {expression!r} from imports or source assignments.")
 
